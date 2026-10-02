@@ -12,3 +12,9 @@ Notes
 * `--rule figure` (default) maps tau so that larger tau keeps more domain blocks (as in the
   paper's Fig. 2); `--rule literal` uses the inequality exactly as printed.
 * Tables 1-3: Algorithm II. Table 4: standard / Algorithm I / Algorithm II at tau=1e-5 on image 4.
+
+## Chaotic SOM variants (ablation)
+    python fractal_medical.py --som-init chaotic --som-sched chaotic
+    python ablation.py --dir /content/mri --n 20 --size 512 --repeats 3
+`--som-init` random|chaotic|logistic, `--som-sched` linear|chaotic. The SOM has no activation
+function (competitive learning + Gaussian neighbourhood). `ablation.py` writes Table A to `results_ablation/`.
