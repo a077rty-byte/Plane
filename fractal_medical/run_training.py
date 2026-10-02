@@ -32,8 +32,8 @@ def pick_images(root, per_class_seed, max_classes=4):
     if len(by) >= 2 and os.path.abspath(os.path.dirname(files[0])) != os.path.abspath(root):
         names = sorted(by)[:max_classes]
         return names, [rnd.choice(by[k]) for k in names], {k: len(v) for k, v in by.items()}
-    sel = rnd.sample(files, min(max_classes, len(files)))
-    return [os.path.basename(f) for f in sel], sel, {"(flat folder)": len(files)}
+    sel = files                      # flat folder: use ALL the images
+    return [os.path.splitext(os.path.basename(f))[0] for f in sel], sel, {"(flat folder)": len(files)}
 
 
 def box(title, head, rows):

@@ -592,8 +592,8 @@ def make_figures(out, images, enc_cache, tau_list, t4):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--images", nargs="*", help="up to 4 MRI image files "
-                    "(png/jpg/bmp/tif).  If omitted, 4 synthetic MRI-like phantoms are used.")
+    ap.add_argument("--images", nargs="*", help="MRI image files (png/jpg/bmp/tif), any number.")
+    ap.add_argument("--dir", help="folder whose images are ALL used (e.g. the 'training' folder)")
     ap.add_argument("--size", type=int, default=256,
                     help="image side (paper: 512). Must be a multiple of 32. Default 256 for speed")
     ap.add_argument("--tol", type=float, default=5.0, help="range RMS-error tolerance (quad-tree split)")
@@ -608,10 +608,22 @@ def main():
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
 
-    if a.images:
-        images = [load_image(p, a.size) for p in a.images[:4]]
+    paths = []
+    if a.dir:
+        import glob
+        paths = sorted(f for f in glob.glob(os.path.join(a.dir, "**", "*"), recursive=True)
+                       if f.lower().endswith((".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")))
+        if not paths:
+            raise SystemExit("No images found in %s" % a.dir)
+    elif a.images:
+        paths = list(a.images)
+    if paths:
+        images = [load_image(p, a.size) for p in paths]
+        mapping = ["Sample MRI Image %d = %s" % (i + 1, os.path.basename(p)) for i, p in enumerate(paths)]
     else:
         images = [make_phantom(i, a.size) for i in range(4)]
+        mapping = ["Sample MRI Image %d = synthetic phantom %d" % (i + 1, i + 1) for i in range(4)]
+    print("\n".join(mapping))
     from PIL import Image
     for i, im in enumerate(images):
         Image.fromarray(im.astype(np.uint8)).save(os.path.join(a.out, f"input_{i+1}.png"))
@@ -664,7 +676,7 @@ def main():
     text.append("\n".join(t4txt))
     md.append("**Table 4  PSNR achieved for Different Algorithms**\n\n| Metric | " + " | ".join(h4) +
               " |\n|---|---|---|---|\n" + "\n".join("| " + " | ".join(r) + " |" for r in rows4) + "\n")
-    report = "\n\n".join(text)
+    report = "\n".join(mapping) + "\n\n" + "\n\n".join(text)
     print("\n" + report)
     open(os.path.join(a.out, "tables.txt"), "w", encoding="utf-8").write(report + "\n")
     open(os.path.join(a.out, "tables.md"), "w", encoding="utf-8").write("\n".join(md))
