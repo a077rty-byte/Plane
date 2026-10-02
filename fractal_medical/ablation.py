@@ -19,6 +19,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", help="folder with MRI images (searched recursively)")
     ap.add_argument("--n", type=int, default=8, help="number of images")
+    ap.add_argument("--per-class", type=int, default=0,
+                    help="if >0: take this many images from EACH class sub-folder of --dir")
     ap.add_argument("--size", type=int, default=256)
     ap.add_argument("--tau", type=float, default=1e-5)
     ap.add_argument("--repeats", type=int, default=3, help="seeds / chaotic start points per config")
@@ -31,7 +33,14 @@ def main():
         files = sorted(f for f in glob.glob(os.path.join(a.dir, "**", "*"), recursive=True)
                        if f.lower().endswith((".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")))
         random.seed(1)
-        files = random.sample(files, min(a.n, len(files)))
+        if a.per_class > 0:
+            by = {}
+            for f in files:
+                by.setdefault(os.path.basename(os.path.dirname(f)), []).append(f)
+            files = [f for k in sorted(by) for f in random.sample(by[k], min(a.per_class, len(by[k])))]
+            print({k: min(a.per_class, len(v)) for k, v in sorted(by.items())})
+        else:
+            files = random.sample(files, min(a.n, len(files)))
         images = [fm.load_image(f, a.size) for f in files]
     else:
         images = [fm.make_phantom(i, a.size) for i in range(a.n)]
