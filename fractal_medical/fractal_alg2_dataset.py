@@ -26,7 +26,7 @@ PAPER MODE  (--paper)  -  the experiment exactly as in the paper, for a small fo
     !python fractal_alg2_dataset.py --paper --source /content/drive/MyDrive/training --out /content/drive/MyDrive/paper_results
   Every image of the folder = "Sample MRI Image 1, 2, ...".  Tables 1-3: Algorithm II at tau = 1e-3 .. 1e-6
   (one row per image + Avg).  Table 4: standard / Algorithm I / Algorithm II at tau = 1e-5 on image 4
-  (--t4-image N to change).  Figures 1, 2, 3, 5, 6, 7, 8 (needs matplotlib).  Output: tables.txt/.md, fig*.png.
+  (--t4-image N to change; --repeats 3 = mean time of 3 encodings).  Tables 5-6 = time breakdown.  Figures 1, 2, 3, 5, 6, 7, 8 (needs matplotlib).  Output: tables.txt/.md, fig*.png.
 
 Quick start (Colab)
     from google.colab import drive; drive.mount('/content/drive')
@@ -309,10 +309,13 @@ class DomainPool:
         self.sum_d = self.all[0].sum(1)
         self.sum_dd = (self.all[0] ** 2).sum(1)
         self.labels = None
+        self.t_som = 0.0                                    # time spent training the SOM + labelling the domains
         if grid:
+            t0 = time.perf_counter()
             feats = block_features(base)
             self.som = SOM(grid).fit(feats)
             self.labels = self.som.predict(feats)
+            self.t_som = time.perf_counter() - t0
 
     def candidates(self, label=None):
         if label is None or self.labels is None:
@@ -356,6 +359,9 @@ def encode(img, algo, tau, cfg):
     e = Encoded()
     e.algo, e.shape, e.maps = algo, img.shape, []
     e.tau_eff, e.dom, e.leaves = 0.0, [], []
+    # time breakdown: SOM training, labelling of range blocks, search, rest (quad-tree, pools, zlib ...)
+    e.t_som = e.t_label = e.t_search = 0.0
+    e.n_search, e.cand_frac = 0, 0.0          # number of searches, mean fraction of the pool that was searched
 
     if algo == "standard":
         e.seed_mask = np.zeros(img.shape, bool)
@@ -365,8 +371,13 @@ def encode(img, algo, tau, cfg):
         e.pools, e.seed_bytes = {STD_RANGE: pool}, 0
         for y in range(0, H, STD_RANGE):
             for x in range(0, W, STD_RANGE):
+                s0 = time.perf_counter()
                 d, k, si, o, _ = best_match(img[y:y + STD_RANGE, x:x + STD_RANGE].ravel(), pool, pool.candidates())
+                e.t_search += time.perf_counter() - s0
+                e.n_search += 1
+                e.cand_frac += 1.0
                 e.maps.append((y, x, STD_RANGE, d, k, si, o))
+        e.cand_frac /= max(1, e.n_search)
         e.bits = _count_bits(e, 0)
         e.time = time.perf_counter() - t0
         return e
@@ -383,6 +394,7 @@ def encode(img, algo, tau, cfg):
     e.pools, r = {}, MAX_SIZE
     while r >= RMIN:
         e.pools[r] = DomainPool(P, anchors, r, H, W, grid)
+        e.t_som += e.pools[r].t_som
         r //= 2
 
     stack = list(rng_blocks)
@@ -390,13 +402,21 @@ def encode(img, algo, tau, cfg):
         y, x, r = stack.pop()
         blk = img[y:y + r, x:x + r]
         pool = e.pools[r]
+        l0 = time.perf_counter()
         lab = int(pool.som.predict(block_features(blk[None]))[0]) if algo == "alg2" else None
-        d, k, si, o, sse = best_match(blk.ravel(), pool, pool.candidates(lab))
+        idx = pool.candidates(lab)
+        s0 = time.perf_counter()
+        e.t_label += s0 - l0
+        d, k, si, o, sse = best_match(blk.ravel(), pool, idx)
+        e.t_search += time.perf_counter() - s0
+        e.n_search += 1
+        e.cand_frac += len(idx) / pool.n
         if math.sqrt(sse / (r * r)) > cfg["tol"] and r > RMIN:      # poor match -> 4 smaller range blocks
             h = r // 2
             stack += [(y, x, h), (y, x + h, h), (y + h, x, h), (y + h, x + h, h)]
         else:
             e.maps.append((y, x, r, d, k, si, o))
+    e.cand_frac /= max(1, e.n_search)
     e.bits = _count_bits(e, len(leaves) * 4 // 3 + len(dom) // 8)
     e.time = time.perf_counter() - t0
     return e
@@ -648,13 +668,21 @@ def paper_main(a, items, cfg, taus):
                 % (n, images[0].shape[0], images[0].shape[1], a.groups, a.groups, SOM_EPOCHS, a.tol, a.rule),
                 "  quad-tree: max block %d, d_min %d, r_min %d, split variance %.0f; tau_eff: %s"
                 % (MAX_SIZE, DMIN, RMIN, SPLIT_VAR, ", ".join("%s->%.4f" % (tau_name(t), tau_effective(t, a.rule)) for t in taus)),
-                "  Table 4 image: Sample MRI Image %d" % (t4_idx + 1)]
+                "  Table 4 image: Sample MRI Image %d   |   encoding time = mean of %d run(s)" % (t4_idx + 1, max(1, a.repeats))]
     print("\n".join(mapping + [""] + settings), flush=True)
 
+    reps = max(1, a.repeats)
+
     def run(img, algo, tau):
-        e = encode(img, algo, tau, cfg)
+        """Encode `reps` times (time = mean, less noisy), decode once.  e.bd = mean time breakdown."""
+        es = [encode(img, algo, tau, cfg) for _ in range(reps)]
+        e = es[-1]
         rec = decode(e, img)
-        e.metrics = dict(psnr=psnr(img, rec), time=e.time, cr=img.size * 8.0 / e.bits)
+        mean = lambda f: float(np.mean([f(x) for x in es]))
+        e.bd = dict(som=mean(lambda x: x.t_som), label=mean(lambda x: x.t_label), search=mean(lambda x: x.t_search),
+                    total=mean(lambda x: x.time), n=e.n_search, frac=e.cand_frac)
+        e.bd["other"] = e.bd["total"] - e.bd["som"] - e.bd["label"] - e.bd["search"]
+        e.metrics = dict(psnr=psnr(img, rec), time=e.bd["total"], cr=img.size * 8.0 / e.bits)
         return e, rec
 
     enc = {}
@@ -673,15 +701,36 @@ def paper_main(a, items, cfg, taus):
         rows.append(["Avg"] + ["%.2f" % np.mean([enc[(i, t)].metrics[key] for i in range(n)]) for t in taus])
         blocks.append(box(title, head, rows)); mds.append(md(title, head, rows))
 
-    t4, tau4 = {}, 1e-5                                         # Table 4: the three algorithms
+    t4, t4e, tau4 = {}, {}, 1e-5                                # Table 4: the three algorithms
     for algo in ALGOS:
         e, rec = run(images[t4_idx], algo, tau4)
+        t4e[algo] = e
         t4[algo] = (e.metrics["psnr"], e.metrics["time"], e.metrics["cr"], rec)
         print("  Table 4  %-8s PSNR=%6.2f  time=%8.2f s  CR=%6.2f" % (algo, *t4[algo][:3]), flush=True)
     h4 = ["Metric", "Standard Fractal Encoding", "Proposed Algorithm I (tau=1e-5)", "Proposed Algorithm II (tau=1e-5)"]
     r4 = [[m] + ["%.2f" % t4[k][j] for k in ALGOS] for j, m in enumerate(("PSNR (dB)", "Compression Time (sec)", "Compression Ratio"))]
     ttl4 = "Table 4  PSNR achieved for Different Algorithms (Sample MRI Image %d)" % (t4_idx + 1)
     blocks.append(box(ttl4, h4, r4)); mds.append(md(ttl4, h4, r4))
+    # ---- Table 5 / 6: where does the encoding time go?  (explains the speed-up of Algorithm II)
+    def bd_rows(bds):
+        f = lambda k, fmt="%.2f": [fmt % np.mean([b[k] for b in bl]) for bl in bds]
+        return [["SOM training + labelling of the domains (s)"] + f("som"),
+                ["labelling of the range blocks (s)"] + f("label"),
+                ["matching search (s)"] + f("search"),
+                ["rest: quad-tree, pools, zlib (s)"] + f("other"),
+                ["TOTAL encoding time (s)"] + f("total"),
+                ["number of searches"] + f("n", "%.0f"),
+                ["% of the domain pool searched per range block"] + [("%.1f" % (100 * np.mean([b["frac"] for b in bl]))) for bl in bds]]
+    h5 = ["Algorithm II  (mean over %d images)" % n] + [tau_name(t) for t in taus]
+    r5 = bd_rows([[enc[(i, t)].bd for i in range(n)] for t in taus])
+    ttl5 = "Table 5  Where the encoding time goes - Algorithm II at every threshold"
+    blocks.append(box(ttl5, h5, r5)); mds.append(md(ttl5, h5, r5))
+    h6 = ["Sample image %d, tau=1e-5" % (t4_idx + 1), "Standard", "Algorithm I", "Algorithm II"]
+    cols = [bd_rows([[t4e[k].bd]]) for k in ALGOS]
+    r6 = [[cols[0][i][0]] + [c[i][1] for c in cols] for i in range(len(cols[0]))]
+    ttl6 = "Table 6  Time breakdown of the three algorithms (does grouping pay off?)"
+    blocks.append(box(ttl6, h6, r6)); mds.append(md(ttl6, h6, r6))
+
     ref = [[m] + ["%g" % v for v in vals] for m, vals in PAPER_TABLE4.items()]
     ttl_ref = "For reference - values printed in the paper's Table 4 (its own MRI image, its own machine)"
     blocks.append(box(ttl_ref, h4[:1] + ["Standard", "Algorithm I", "Algorithm II"], ref))
@@ -733,6 +782,7 @@ def main(argv=None):
     ap.add_argument("--paper", action="store_true",
                     help="reproduce the paper's experiment on ALL images of --source (e.g. your 6 'training' images): "
                          "Tables 1-4 in the paper's layout + Figures 1,2,3,5,6,7,8")
+    ap.add_argument("--repeats", type=int, default=1, help="--paper: encode every case this many times and report the mean time (3 is steadier)")
     ap.add_argument("--t4-image", type=int, default=4, help="--paper: sample image used in Table 4 (paper: 4)")
     ap.add_argument("--force", action="store_true", help="continue even if the settings differ from the earlier run")
     a, _ = ap.parse_known_args(argv)          # parse_known_args: harmless inside Jupyter / Colab
