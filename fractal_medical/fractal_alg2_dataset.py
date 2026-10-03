@@ -22,6 +22,12 @@ What "any size" means here
   * ANY FOLDER LAYOUT     - a .zip file or a folder, searched recursively; the class is the name of
     the parent folder (training/glioma/x.jpg -> 'glioma').  Works with 1 image or 1,000,000.
 
+PAPER MODE  (--paper)  -  the experiment exactly as in the paper, for a small folder (e.g. 6 images)
+    !python fractal_alg2_dataset.py --paper --source /content/drive/MyDrive/training --out /content/drive/MyDrive/paper_results
+  Every image of the folder = "Sample MRI Image 1, 2, ...".  Tables 1-3: Algorithm II at tau = 1e-3 .. 1e-6
+  (one row per image + Avg).  Table 4: standard / Algorithm I / Algorithm II at tau = 1e-5 on image 4
+  (--t4-image N to change).  Figures 1, 2, 3, 5, 6, 7, 8 (needs matplotlib).  Output: tables.txt/.md, fig*.png.
+
 Quick start (Colab)
     from google.colab import drive; drive.mount('/content/drive')
     !python /content/drive/MyDrive/fractal_alg2_dataset.py \
@@ -480,6 +486,22 @@ def read_rows(path):
         return list(csv.DictReader(f))
 
 
+def box(title, head, body):
+    w = [max(len(h), *(len(r[i]) for r in body)) + 2 for i, h in enumerate(head)]
+    ln = "+" + "+".join("-" * x for x in w) + "+"
+    o = [title, ln, "|" + "|".join(h.center(x) for h, x in zip(head, w)) + "|", ln]
+    for r in body:
+        if r[0] in ("Avg", "Avg (all)"):
+            o.append(ln)
+        o.append("|" + "|".join(c.center(x) for c, x in zip(r, w)) + "|")
+    return "\n".join(o + [ln])
+
+
+def md(title, head, body):
+    return ("**%s**\n\n| " % title + " | ".join(head) + " |\n|" + "---|" * len(head) + "\n" +
+            "\n".join("| " + " | ".join(r) + " |" for r in body) + "\n")
+
+
 def write_summary(out, settings_lines):
     rows = read_rows(os.path.join(out, "results.csv"))
     if not rows:
@@ -491,20 +513,6 @@ def write_summary(out, settings_lines):
     n_img = len({r["image"] for r in rows})
     classes = sorted({r["cls"] for r in rows})
     blocks, mds = [], []
-
-    def box(title, head, body):
-        w = [max(len(h), *(len(r[i]) for r in body)) + 2 for i, h in enumerate(head)]
-        ln = "+" + "+".join("-" * x for x in w) + "+"
-        o = [title, ln, "|" + "|".join(h.center(x) for h, x in zip(head, w)) + "|", ln]
-        for r in body:
-            if r[0] in ("Avg (all)",):
-                o.append(ln)
-            o.append("|" + "|".join(c.center(x) for c, x in zip(r, w)) + "|")
-        return "\n".join(o + [ln])
-
-    def md(title, head, body):
-        return ("**%s**\n\n| " % title + " | ".join(head) + " |\n|" + "---|" * len(head) + "\n" +
-                "\n".join("| " + " | ".join(r) + " |" for r in body) + "\n")
 
     for algo in algos:
         sub = [r for r in rows if r["algo"] == algo]
@@ -546,6 +554,151 @@ def write_summary(out, settings_lines):
 
 
 # ==========================================================================
+# 9b. PAPER MODE: the paper's experiment exactly (Tables 1-4, Figures 1,2,3,5,6,7,8)
+# ==========================================================================
+PAPER_TABLE4 = {"PSNR (dB)": (27.49, 29.67, 29.72), "Compression Time (sec)": (1738, 459.73, 37.17),
+                "Compression Ratio": (3.20, 19.6, 19.6)}
+
+
+def make_figures(out, images, enc, t4, t4_idx, taus):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Rectangle
+    n = len(images)
+    tl = lambda t: "1e%d" % int(round(math.log10(t)))
+    t_fig1 = 1e-5 if 1e-5 in taus else taus[len(taus) // 2]
+
+    sel = [0, min(1, n - 1)]                                   # Fig. 1: images 1 and 2
+    fig, ax = plt.subplots(3, 2, figsize=(8, 12))
+    for c, i in enumerate(sel):
+        e = enc[(i, t_fig1)]
+        ax[0, c].imshow(images[i], cmap="gray"); ax[0, c].set_title("Sample MRI Image %d" % (i + 1))
+        ax[1, c].imshow(images[i], cmap="gray")
+        for (y, x, s) in e.leaves:
+            ax[1, c].add_patch(Rectangle((x, y), s, s, fill=False, ec="w", lw=0.4))
+        m = np.ones(images[i].shape); m[e.seed_mask] = 0
+        ax[2, c].imshow(m, cmap="gray", vmin=0, vmax=1)
+    ax[0, 0].set_ylabel("Input Image"); ax[1, 0].set_ylabel("The Partitioned Image"); ax[2, 0].set_ylabel("Separated Domain Blocks")
+    for a in ax.ravel():
+        a.set_xticks([]); a.set_yticks([])
+    fig.suptitle("Fig. 1  Feature rich and separated domain blocks")
+    fig.savefig(os.path.join(out, "fig1_partition.png"), dpi=130, bbox_inches="tight"); plt.close(fig)
+
+    sel = [min(2, n - 1), min(3, n - 1)]                       # Fig. 2: images 3 and 4, every threshold
+    fig, ax = plt.subplots(len(taus) + 1, 2, figsize=(8, 3.6 * (len(taus) + 1)), squeeze=False)
+    for c, i in enumerate(sel):
+        ax[0, c].imshow(images[i], cmap="gray"); ax[0, c].set_title("Sample MRI Image %d" % (i + 1))
+        for r, t in enumerate(taus):
+            m = np.ones(images[i].shape); m[enc[(i, t)].seed_mask] = 0
+            ax[r + 1, c].imshow(m, cmap="gray", vmin=0, vmax=1)
+            ax[r + 1, c].set_ylabel("Threshold = %s" % tl(t))
+    for a in ax.ravel():
+        a.set_xticks([]); a.set_yticks([])
+    fig.suptitle("Fig. 2  Domain blocks separated for various thresholds")
+    fig.savefig(os.path.join(out, "fig2_thresholds.png"), dpi=110, bbox_inches="tight"); plt.close(fig)
+
+    avg = {k: [np.mean([enc[(i, t)].metrics[k] for i in range(n)]) for t in taus] for k in ("psnr", "time", "cr")}
+    fig, ax = plt.subplots(figsize=(7, 5))                     # Fig. 3
+    xs = [tl(t) for t in taus]
+    ax.plot(xs, avg["psnr"], "bd-", label="PSNR"); ax.plot(xs, avg["time"], "ms-", label="Encoding Time")
+    ax.plot(xs, avg["cr"], "b^-", mfc="none", label="Compression Ratio")
+    ax.set_xlabel("The Threshold"); ax.set_ylabel("Performance"); ax.grid(True); ax.legend(); ax.set_title("The Performance Analysis")
+    fig.savefig(os.path.join(out, "fig3_performance.png"), dpi=130, bbox_inches="tight"); plt.close(fig)
+
+    nm = ["The Std. Fractal compression Algorithm", "The Proposed Algorithm I", "The Proposed Algorithm II"]
+    fig, ax = plt.subplots(1, 4, figsize=(16, 4.4))            # Fig. 5
+    ax[0].imshow(images[t4_idx], cmap="gray"); ax[0].set_title("Original (Sample image %d)" % (t4_idx + 1))
+    for a, k, name in zip(ax[1:], ALGOS, nm):
+        a.imshow(t4[k][3], cmap="gray", vmin=0, vmax=255); a.set_title("%s\nPSNR=%.2f dB" % (name, t4[k][0]), fontsize=9)
+    for a in ax:
+        a.axis("off")
+    fig.suptitle("Fig. 5  PSNR for all three algorithms")
+    fig.savefig(os.path.join(out, "fig5_reconstruction.png"), dpi=130, bbox_inches="tight"); plt.close(fig)
+
+    bn = ["Standard\nFractal Encoding", "Proposed\nAlgorithm I", "Proposed\nAlgorithm II"]   # Fig. 6, 7, 8
+    for fn, key, yl, ttl, col in (("fig6_psnr.png", 0, "PSNR(db)", "PSNR", "#9999ff"),
+                                  ("fig7_time.png", 1, "Compression Time(sec)", "Time Taken for Different Methods", "#339966"),
+                                  ("fig8_cr.png", 2, "Compression Ratio", "Compression Ratio of Different Methods", "#3366ff")):
+        fig, ax = plt.subplots(figsize=(5, 4))
+        vals = [t4[a][key] for a in ALGOS]
+        bars = ax.bar(bn, vals, color=col, ec="k")
+        for rect, v in zip(bars, vals):
+            ax.text(rect.get_x() + rect.get_width() / 2, v, "%.2f" % v, ha="center", va="bottom")
+        ax.set_ylabel(yl); ax.set_title(ttl); ax.grid(axis="y")
+        fig.savefig(os.path.join(out, fn), dpi=130, bbox_inches="tight"); plt.close(fig)
+
+
+def paper_main(a, items, cfg, taus):
+    """The paper's experiment on the images of --source (the 'training' folder, e.g. 6 images):
+    Tables 1-3 = Algorithm II, one row per image + Avg; Table 4 = standard / Alg. I / Alg. II at
+    tau = 1e-5 on image --t4-image (paper: image 4); Figures 1, 2, 3, 5, 6, 7, 8."""
+    from PIL import Image
+    out, n = a.out, len(items)
+    names = [it[0] for it in items]
+    images = []
+    for nm in names:
+        img, h, w = prepare(decode_gray(read_bytes(a.source, nm)), a.size or IMG_SIZE)
+        images.append(img)
+    for i, im in enumerate(images):
+        Image.fromarray(im.astype(np.uint8)).save(os.path.join(out, "input_%d.png" % (i + 1)))
+    t4_idx = min(max(a.t4_image, 1), n) - 1
+    mapping = ["Sample MRI Image %d = %s" % (i + 1, nm) for i, nm in enumerate(names)]
+    settings = ["Settings: PAPER MODE  images=%d  size=%dx%d  SOM grid=%dx%d (%d epochs)  tol=%.1f  rule=%s"
+                % (n, images[0].shape[0], images[0].shape[1], a.groups, a.groups, SOM_EPOCHS, a.tol, a.rule),
+                "  quad-tree: max block %d, d_min %d, r_min %d, split variance %.0f; tau_eff: %s"
+                % (MAX_SIZE, DMIN, RMIN, SPLIT_VAR, ", ".join("%s->%.4f" % (tau_name(t), tau_effective(t, a.rule)) for t in taus)),
+                "  Table 4 image: Sample MRI Image %d" % (t4_idx + 1)]
+    print("\n".join(mapping + [""] + settings), flush=True)
+
+    def run(img, algo, tau):
+        e = encode(img, algo, tau, cfg)
+        rec = decode(e, img)
+        e.metrics = dict(psnr=psnr(img, rec), time=e.time, cr=img.size * 8.0 / e.bits)
+        return e, rec
+
+    enc = {}
+    for i, im in enumerate(images):                             # Tables 1-3: Algorithm II
+        for t in taus:
+            e, _ = run(im, "alg2", t)
+            enc[(i, t)] = e
+            print("  image %d  %s  PSNR=%6.2f  time=%7.2f s  CR=%6.2f  domain blocks=%d"
+                  % (i + 1, tau_name(t), e.metrics["psnr"], e.metrics["time"], e.metrics["cr"], len(e.dom)), flush=True)
+    head = ["Sample MRI Image"] + [tau_name(t) for t in taus]
+    blocks, mds = [], []
+    for key, title in (("psnr", "Table 1  PSNR at Different Levels of Compression (dB)"),
+                       ("time", "Table 2  Time Taken at Different Levels of Compression (sec)"),
+                       ("cr", "Table 3  Compression Ratio at Different Thresholds")):
+        rows = [[str(i + 1)] + ["%.2f" % enc[(i, t)].metrics[key] for t in taus] for i in range(n)]
+        rows.append(["Avg"] + ["%.2f" % np.mean([enc[(i, t)].metrics[key] for i in range(n)]) for t in taus])
+        blocks.append(box(title, head, rows)); mds.append(md(title, head, rows))
+
+    t4, tau4 = {}, 1e-5                                         # Table 4: the three algorithms
+    for algo in ALGOS:
+        e, rec = run(images[t4_idx], algo, tau4)
+        t4[algo] = (e.metrics["psnr"], e.metrics["time"], e.metrics["cr"], rec)
+        print("  Table 4  %-8s PSNR=%6.2f  time=%8.2f s  CR=%6.2f" % (algo, *t4[algo][:3]), flush=True)
+    h4 = ["Metric", "Standard Fractal Encoding", "Proposed Algorithm I (tau=1e-5)", "Proposed Algorithm II (tau=1e-5)"]
+    r4 = [[m] + ["%.2f" % t4[k][j] for k in ALGOS] for j, m in enumerate(("PSNR (dB)", "Compression Time (sec)", "Compression Ratio"))]
+    ttl4 = "Table 4  PSNR achieved for Different Algorithms (Sample MRI Image %d)" % (t4_idx + 1)
+    blocks.append(box(ttl4, h4, r4)); mds.append(md(ttl4, h4, r4))
+    ref = [[m] + ["%g" % v for v in vals] for m, vals in PAPER_TABLE4.items()]
+    ttl_ref = "For reference - values printed in the paper's Table 4 (its own MRI image, its own machine)"
+    blocks.append(box(ttl_ref, h4[:1] + ["Standard", "Algorithm I", "Algorithm II"], ref))
+
+    text = "\n".join(mapping) + "\n\n" + "\n".join(settings) + "\n\n" + "\n\n".join(blocks) + "\n"
+    print("\n" + text)
+    open(os.path.join(out, "tables.txt"), "w", encoding="utf-8").write(text)
+    open(os.path.join(out, "tables.md"), "w", encoding="utf-8").write(
+        "```\n" + "\n".join(mapping + [""] + settings) + "\n```\n\n" + "\n".join(mds))
+    try:
+        make_figures(out, images, enc, t4, t4_idx, taus)
+    except ImportError:
+        print("matplotlib is not installed -> figures skipped (pip install matplotlib)")
+    print("Saved in:", os.path.abspath(out))
+
+
+# ==========================================================================
 # 10. Main
 # ==========================================================================
 def maybe_mount_drive(path):
@@ -577,6 +730,10 @@ def main(argv=None):
     ap.add_argument("--rule", choices=["figure", "literal"], default="figure", help="how tau maps to the variance threshold")
     ap.add_argument("--workers", type=int, default=1, help="parallel processes (1 = exact timings)")
     ap.add_argument("--save-recon", type=int, default=3, help="save the first N reconstructions to recon/ (0 = none)")
+    ap.add_argument("--paper", action="store_true",
+                    help="reproduce the paper's experiment on ALL images of --source (e.g. your 6 'training' images): "
+                         "Tables 1-4 in the paper's layout + Figures 1,2,3,5,6,7,8")
+    ap.add_argument("--t4-image", type=int, default=4, help="--paper: sample image used in Table 4 (paper: 4)")
     ap.add_argument("--force", action="store_true", help="continue even if the settings differ from the earlier run")
     a, _ = ap.parse_known_args(argv)          # parse_known_args: harmless inside Jupyter / Colab
 
@@ -587,6 +744,13 @@ def main(argv=None):
     cfg = dict(size=a.size, tile=a.tile, groups=a.groups, tol=a.tol, rule=a.rule, save_recon=a.save_recon > 0)
     taus = sorted(set(a.taus), reverse=True)
     algos = [x for x in ALGOS if x in a.algos]
+    if a.paper:
+        items = sorted(list_images(a.source))
+        if a.limit and 0 < a.limit < len(items):
+            items = items[:a.limit]
+        if not items:
+            raise SystemExit("no images found in %s" % a.source)
+        return paper_main(a, items, cfg, taus)
     settings = dict(algos=algos, taus=taus, size=a.size, tile=a.tile, groups=a.groups, tol=a.tol, rule=a.rule,
                     split=a.split, limit=a.limit, per_class=a.per_class, seed=a.seed, source=os.path.abspath(a.source),
                     dmin=DMIN, max_block=MAX_SIZE, rmin=RMIN, som_epochs=SOM_EPOCHS)
