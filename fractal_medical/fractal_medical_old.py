@@ -175,88 +175,25 @@ def separate_domain_range(img, leaves, dmin, tau, rule="figure"):
 # --------------------------------------------------------------------------
 # Self-Organising Map (Kohonen)  (Section 3.2)
 # --------------------------------------------------------------------------
-class BSLCStream:
-    """Bidirectionally coupled chaotic map (BSLC) used as a deterministic
-    pseudo-random source.  Same equations as the chaotic BPNN code:
-        x' = 4x(1-x)(1-mu) + mu sin^2(pi y/2)
-        y' = 4y(1-y)(1-mu) + mu sin^2(pi x/2)
-        Z  = (x * y) mod 1
-    """
-
-    def __init__(self, mu=0.10, x0=0.2468, y0=0.3691, burn=200):
-        self.mu, self.x, self.y = mu, float(x0), float(y0)
-        for _ in range(burn):
-            self._step()
-
-    def _step(self):
-        mu, x, y = self.mu, self.x, self.y
-        xn = 4.0 * x * (1.0 - x) * (1.0 - mu) + mu * math.sin(math.pi * y / 2.0) ** 2
-        yn = 4.0 * y * (1.0 - y) * (1.0 - mu) + mu * math.sin(math.pi * x / 2.0) ** 2
-        self.x = min(max(xn, 1e-7), 1 - 1e-7)
-        self.y = min(max(yn, 1e-7), 1 - 1e-7)
-
-    def next_z(self):
-        self._step()
-        return (self.x * self.y) % 1.0
-
-    def z_sequence(self, n):
-        return np.array([self.next_z() for _ in range(n)])
-
-
 class SOM:
     """
-    1. initialise node weights  2. grab an input vector
+    1. randomise node weights   2. grab an input vector
     3. traverse every node      4. Euclidean distance to the input
     5. keep the Best Matching Unit (BMU)
     6. Wv(t+1) = Wv(t) + theta(t) * alpha(t) * (D(t) - Wv(t))   (neighbourhood)
-
-    There is NO activation function: learning is competitive (winner = smallest
-    Euclidean distance) and the neighbourhood function
-        theta(t) = exp(-d^2 / (2 sigma(t)^2))        (Gaussian)
-    plays the role that an activation plays in a feed-forward network.
-
-    init  : "random"   weights = random training samples (+ tiny noise)
-            "chaotic"  weights = lo + (hi-lo) * Z_n  (BSLC stream), per-feature range
-            "logistic" same, with the logistic map r=3.9
-    sched : "linear"   alpha(t) = lr0 * (1 - t/T)
-            "chaotic"  alpha(t) = lr0 * (1 - t/T) * (a_min + (a_max-a_min) Z_t)
-                       (BSLC modulation, a_min=0.5, a_max=1.0, so alpha never
-                        exceeds the linear schedule)
     """
 
-    def __init__(self, grid=(3, 3), epochs=15, lr0=0.5, seed=0,
-                 init="random", sched="linear", chaos_x0=0.2468, chaos_y0=0.3691):
+    def __init__(self, grid=(3, 3), epochs=15, lr0=0.5, seed=0):
         self.grid, self.epochs, self.lr0 = grid, epochs, lr0
-        self.init, self.sched = init, sched
         self.rs = np.random.RandomState(seed)
-        self.chaos = (chaos_x0, chaos_y0)
         gy, gx = np.mgrid[0:grid[0], 0:grid[1]]
         self.pos = np.stack([gy.ravel(), gx.ravel()], 1).astype(float)
         self.n = grid[0] * grid[1]
 
-    def _init_weights(self, X):
-        if self.init == "random":
-            idx = self.rs.choice(len(X), self.n, replace=len(X) < self.n)
-            return X[idx].copy() + 1e-3 * self.rs.randn(self.n, X.shape[1])
-        if self.init == "chaotic":
-            z = BSLCStream(x0=self.chaos[0], y0=self.chaos[1]).z_sequence(self.n * X.shape[1])
-        elif self.init == "logistic":
-            x, zs = self.chaos[0], []
-            for k in range(200 + self.n * X.shape[1]):
-                x = 3.9 * x * (1.0 - x)
-                if k >= 200:
-                    zs.append(x)
-            z = np.array(zs)
-        else:
-            raise ValueError("unknown SOM init: %s" % self.init)
-        lo, hi = X.min(0), X.max(0)
-        return lo + (hi - lo) * z.reshape(self.n, X.shape[1])
-
     def fit(self, X):
         X = np.asarray(X, dtype=np.float64)
-        self.W = self._init_weights(X)
-        stream = (BSLCStream(x0=self.chaos[0], y0=self.chaos[1])
-                  if self.sched == "chaotic" else None)
+        idx = self.rs.choice(len(X), self.n, replace=len(X) < self.n)
+        self.W = X[idx].copy() + 1e-3 * self.rs.randn(self.n, X.shape[1])
         total = self.epochs * len(X)
         t = 0
         sig0 = max(self.grid) / 2.0
@@ -264,17 +201,12 @@ class SOM:
             for i in self.rs.permutation(len(X)):
                 f = 1.0 - t / total
                 alpha, sig = self.lr0 * f, max(0.5, sig0 * f)
-                if stream is not None:
-                    alpha *= 0.5 + 0.5 * stream.next_z()
                 d = ((self.W - X[i]) ** 2).sum(1)
                 bmu = d.argmin()
                 theta = np.exp(-((self.pos - self.pos[bmu]) ** 2).sum(1)
                                / (2 * sig ** 2))
                 self.W += (theta * alpha)[:, None] * (X[i] - self.W)
                 t += 1
-        # quantisation error: mean distance of every sample to its BMU
-        dall = np.sqrt(((X[:, None, :] - self.W[None]) ** 2).sum(2))
-        self.qe = float(dall.min(1).mean())
         return self
 
     def predict(self, X):
@@ -305,7 +237,7 @@ class DomainPool:
     """All domain candidates (2r x 2r windows anchored at the seed blocks,
     down-sampled to r x r) with their 8 isometries, for one range size r."""
 
-    def __init__(self, P, anchors, r, n_img, som_grid=None, seed=0, som_kw=None):
+    def __init__(self, P, anchors, r, n_img, som_grid=None, seed=0):
         pos = sorted({(min(y, n_img - 2 * r), min(x, n_img - 2 * r))
                       for (y, x) in anchors})
         self.pos = np.array(pos)
@@ -318,7 +250,7 @@ class DomainPool:
         self.labels = None
         if som_grid is not None:
             self.feat = block_features(base)
-            self.som = SOM(som_grid, seed=seed, **(som_kw or {})).fit(self.feat)
+            self.som = SOM(som_grid, seed=seed).fit(self.feat)
             self.labels = self.som.predict(self.feat)
 
     def candidates(self, label=None):
@@ -360,7 +292,7 @@ class Encoded:
 
 def encode(img, algo, tau=1e-5, dmin=8, max_size=32, rmin=4, tol=5.0,
            split_var=60.0, rule="figure", som_grid=(3, 3), std_range=8,
-           std_stride=8, som_kw=None, som_seed=0):
+           std_stride=8):
     """algo in {'standard','alg1','alg2'}.  Returns an Encoded object."""
     t0 = time.perf_counter()
     n_img = img.shape[0]
@@ -401,8 +333,7 @@ def encode(img, algo, tau=1e-5, dmin=8, max_size=32, rmin=4, tol=5.0,
     r = max_size
     while r >= rmin:
         e.pools[r] = DomainPool(P, anchors, r, n_img,
-                                som_grid if algo == "alg2" else None,
-                                seed=som_seed, som_kw=som_kw)
+                                som_grid if algo == "alg2" else None)
         r //= 2
 
     # range block features -> group labels (Algorithm II).
@@ -599,43 +530,26 @@ def make_figures(out, images, enc_cache, tau_list, t4):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--images", nargs="*", help="MRI image files (png/jpg/bmp/tif), any number.")
-    ap.add_argument("--dir", help="folder whose images are ALL used (e.g. the 'training' folder)")
+    ap.add_argument("--images", nargs="*", help="any number of MRI image files "
+                    "(png/jpg/bmp/tif).  If omitted, 4 synthetic MRI-like phantoms are used.")
     ap.add_argument("--size", type=int, default=256,
                     help="image side (paper: 512). Must be a multiple of 32. Default 256 for speed")
     ap.add_argument("--tol", type=float, default=5.0, help="range RMS-error tolerance (quad-tree split)")
     ap.add_argument("--rule", choices=["figure", "literal"], default="figure",
                     help="how tau is mapped to the variance threshold (see docstring)")
     ap.add_argument("--groups", type=int, default=3, help="SOM grid side (groups = side^2)")
-    ap.add_argument("--som-init", choices=["random", "chaotic", "logistic"], default="random",
-                    help="SOM weight initialisation")
-    ap.add_argument("--som-sched", choices=["linear", "chaotic"], default="linear",
-                    help="SOM learning-rate schedule")
     ap.add_argument("--out", default="results")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
 
-    paths = []
-    if a.dir:
-        import glob
-        paths = sorted(f for f in glob.glob(os.path.join(a.dir, "**", "*"), recursive=True)
-                       if f.lower().endswith((".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")))
-        if not paths:
-            raise SystemExit("No images found in %s" % a.dir)
-    elif a.images:
-        paths = list(a.images)
-    if paths:
-        images = [load_image(p, a.size) for p in paths]
-        mapping = ["Sample MRI Image %d = %s" % (i + 1, os.path.basename(p)) for i, p in enumerate(paths)]
+    if a.images:
+        images = [load_image(p, a.size) for p in a.images]
     else:
         images = [make_phantom(i, a.size) for i in range(4)]
-        mapping = ["Sample MRI Image %d = synthetic phantom %d" % (i + 1, i + 1) for i in range(4)]
-    print("\n".join(mapping))
     from PIL import Image
     for i, im in enumerate(images):
         Image.fromarray(im.astype(np.uint8)).save(os.path.join(a.out, f"input_{i+1}.png"))
-    kw = dict(tol=a.tol, rule=a.rule, som_grid=(a.groups, a.groups),
-              som_kw=dict(init=a.som_init, sched=a.som_sched))
+    kw = dict(tol=a.tol, rule=a.rule, som_grid=(a.groups, a.groups))
 
     # ---- Tables 1-3 : Algorithm II (fast fractal coding) at each threshold
     enc_cache = {}
@@ -683,7 +597,7 @@ def main():
     text.append("\n".join(t4txt))
     md.append("**Table 4  PSNR achieved for Different Algorithms**\n\n| Metric | " + " | ".join(h4) +
               " |\n|---|---|---|---|\n" + "\n".join("| " + " | ".join(r) + " |" for r in rows4) + "\n")
-    report = "\n".join(mapping) + "\n\n" + "\n\n".join(text)
+    report = "\n\n".join(text)
     print("\n" + report)
     open(os.path.join(a.out, "tables.txt"), "w", encoding="utf-8").write(report + "\n")
     open(os.path.join(a.out, "tables.md"), "w", encoding="utf-8").write("\n".join(md))
