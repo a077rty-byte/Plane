@@ -28,6 +28,12 @@ PAPER MODE  (--paper)  -  the experiment exactly as in the paper, for a small fo
   (one row per image + Avg).  Table 4: standard / Algorithm I / Algorithm II at tau = 1e-5 on image 4
   (--t4-image N to change; --repeats 3 = mean time of 3 encodings).  Tables 5-6 = time breakdown.  Figures 1, 2, 3, 5, 6, 7, 8 (needs matplotlib).  Output: tables.txt/.md, fig*.png.
 
+  NEURAL CLASSIFIER (--bpnn): ALSO runs Algorithm II with a back-propagation network (sigmoid activation
+  phi(v)=1/(1+exp(-v)), BSLC chaotic initialisation, chaotic theta_n / alpha_n - the equations of
+  Main_codeChaotic.py) as the supervised classifier of step 4, instead of the SOM.  Leave-one-out over the
+  images (the image being coded is never in the training set), so it needs >= 2 images.  Adds Tables 1b-3b,
+  7 and a column in Tables 4 and 6.   --nn-mode gbdr | chaotic | chaotic-epoch   --nn-init BSLC|tanh|sigmoid|Logistic|random
+
 Quick start (Colab)
     from google.colab import drive; drive.mount('/content/drive')
     !python /content/drive/MyDrive/fractal_alg2_dataset.py \
@@ -59,6 +65,7 @@ import sys
 import time
 import zipfile
 import zlib
+from types import SimpleNamespace
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import numpy as np
@@ -294,13 +301,212 @@ def block_features(blocks):
 
 
 # ==========================================================================
+# 5b. Neural classifier with the activation function of Main_codeChaotic.py
+# ==========================================================================
+# Paper, Algorithm II, step 4: "organize n groups of domain blocks and range blocks using a
+# SUPERVISED classification technique".  The SOM above has no activation function (competitive
+# learning).  Here the group of a range block is predicted by a back-propagation network (BPNN)
+# whose equations are those of Main_codeChaotic.py:
+#     hidden  h_j = phi(sum_i W1_ij x_i + theta_n)        output  a_k = phi(sum_j W2_jk h_j)
+#     ACTIVATION  phi(v) = 1 / (1 + exp(-v))   (sigmoid),   phi'(net) = phi(net) (1 - phi(net))
+#     delta_k = (t_k - a_k) phi'(net_k)         delta_j = phi'(net_j) sum_k delta_k W2_jk
+#     W2 <- alpha_n W2 + eta delta_k h_j        W1 <- alpha_n W1 + eta delta_j x_i
+#     weights initialised from the BSLC chaotic map, theta_n and alpha_n drawn from BSLC at every update.
+# NOTE: in Main_codeChaotic.py the table label says "BSLC phi(s)" but the code (and this file)
+# implements the sigmoid above.
+MU_BSLC, X0, Y0, BURN_IN = 0.10, 0.2468, 0.3691, 200
+A_WEIGHT, B_WEIGHT = -1.0, 1.0
+THETA_MIN, THETA_MAX = 0.0, 0.1
+ALPHA_MIN, ALPHA_MAX = 0.98, 0.99999
+
+
+def phi(v):
+    """Activation function: sigmoid."""
+    return 1.0 / (1.0 + np.exp(-np.clip(v, -500, 500)))
+
+
+class BSLCStream:
+    """x' = 4x(1-x)(1-mu) + mu sin^2(pi y/2),  y' = 4y(1-y)(1-mu) + mu sin^2(pi x/2),  Z = (x*y) mod 1."""
+
+    def __init__(self, mu=MU_BSLC, x0=X0, y0=Y0, burn=BURN_IN):
+        self.mu, self.x, self.y = mu, float(x0), float(y0)
+        for _ in range(burn):
+            self._step()
+
+    def _step(self):
+        mu, x, y = self.mu, self.x, self.y
+        xn = 4.0 * x * (1.0 - x) * (1.0 - mu) + mu * math.sin(math.pi * y / 2.0) ** 2
+        yn = 4.0 * y * (1.0 - y) * (1.0 - mu) + mu * math.sin(math.pi * x / 2.0) ** 2
+        self.x, self.y = min(max(xn, 1e-7), 1 - 1e-7), min(max(yn, 1e-7), 1 - 1e-7)
+
+    def next_z(self):
+        self._step()
+        return (self.x * self.y) % 1.0
+
+    def z_sequence(self, n):
+        return np.array([self.next_z() for _ in range(n)], dtype=np.float64)
+
+
+class Map1D:
+    """1-D map (tanh / sigmoid / Logistic) used only for the weight initialisation."""
+
+    def __init__(self, f, x0, burn, to_z=lambda x: x):
+        self.f, self.x, self.to_z = f, float(x0), to_z
+        for _ in range(burn):
+            self.x = self.f(self.x)
+
+    def next_z(self):
+        self.x = self.f(self.x)
+        return float(np.clip(self.to_z(self.x), 1e-7, 1 - 1e-7))
+
+    def z_sequence(self, n):
+        return np.array([self.next_z() for _ in range(n)], dtype=np.float64)
+
+
+def make_init_stream(method, bslc):
+    if method == "BSLC":
+        return bslc                                    # the same stream that later gives theta and alpha
+    if method == "Logistic":
+        return Map1D(lambda x: float(np.clip(3.9 * x * (1.0 - x), 1e-7, 1 - 1e-7)), 0.123456, BURN_IN)
+    if method == "tanh":
+        return Map1D(lambda x: float(np.tanh(2.0 * x + 0.1)), 0.111, 50, to_z=lambda x: 0.5 * (x + 1.0))
+    if method == "sigmoid":
+        return Map1D(lambda x: float(1.0 / (1.0 + np.exp(-(4.0 * x - 2.0)))), 0.111, 50)
+    raise ValueError("unknown init method: %s" % method)
+
+
+class ChaoticBPNN:
+    """Chaotic BPNN of Main_codeChaotic.py (sigmoid phi), several outputs (one per group).
+    init       : 'BSLC' | 'tanh' | 'sigmoid' | 'Logistic' (chaotic weight initialisation) or 'random'
+    mode       : 'gbdr'          W <- W + eta delta (.)                       (alpha = 1, baseline)
+                 'chaotic'       W <- alpha_n W + eta delta (.)  at EVERY update (exactly the file)
+                 'chaotic-epoch' alpha_n applied once per epoch (our variant: thousands of mini-batch
+                                 updates make the per-update decay alpha^steps very strong)"""
+
+    def __init__(self, A, B=128, C=9, init="BSLC", mode="chaotic", eta=0.1, seed=0):
+        self.A, self.B, self.C, self.init, self.mode, self.eta, self.seed = A, B, C, init, mode, eta, seed
+
+    def fit(self, X, T, epochs=30, batch=64, eps=0.005):
+        t0 = time.time()
+        P = len(X)
+        stream = BSLCStream()
+        if self.init == "random":
+            rs = np.random.RandomState(self.seed)
+            self.W1 = rs.uniform(A_WEIGHT, B_WEIGHT, (self.A, self.B))
+            self.W2 = rs.uniform(A_WEIGHT, B_WEIGHT, (self.B, self.C))
+        else:
+            Z = make_init_stream(self.init, stream).z_sequence(self.A * self.B + self.B * self.C)
+            W = A_WEIGHT + (B_WEIGHT - A_WEIGHT) * Z           # U = 2Z-1 in [-1,1] -> [a, b]
+            self.W1, self.W2 = W[:self.A * self.B].reshape(self.A, self.B), W[self.A * self.B:].reshape(self.B, self.C)
+        z = stream.next_z()
+        theta, alpha = THETA_MIN + (THETA_MAX - THETA_MIN) * z, ALPHA_MIN + (ALPHA_MAX - ALPHA_MIN) * z
+        rng = np.random.RandomState(self.seed)
+        E, epoch = np.inf, 0
+        while E > eps and epoch < epochs:
+            order = rng.permutation(P)
+            sq = 0.0
+            for s in range(0, P, batch):
+                idx = order[s:s + batch]
+                x, t = X[idx], T[idx]
+                h = phi(x @ self.W1 + theta)                   # h_j = phi(net_j)
+                a = phi(h @ self.W2)                           # a_k = phi(net_k)
+                err = t - a
+                sq += 0.5 * float(np.sum(err ** 2))
+                dk = err * a * (1.0 - a)                       # delta_k = (t_k - a_k) phi'(net_k)
+                dj = h * (1.0 - h) * (dk @ self.W2.T)          # delta_j = phi'(net_j) sum_k delta_k W2_jk
+                m = len(idx)
+                a_n = alpha if self.mode == "chaotic" else 1.0
+                self.W2 = a_n * self.W2 + self.eta * (h.T @ dk) / m
+                self.W1 = a_n * self.W1 + self.eta * (x.T @ dj) / m
+                z = stream.next_z()                            # next BSLC iteration -> theta_n, alpha_n
+                theta = THETA_MIN + (THETA_MAX - THETA_MIN) * z
+                alpha = ALPHA_MIN + (ALPHA_MAX - ALPHA_MIN) * z
+            if self.mode == "chaotic-epoch":
+                alpha = ALPHA_MIN + (ALPHA_MAX - ALPHA_MIN) * stream.next_z()
+                self.W1, self.W2 = alpha * self.W1, alpha * self.W2
+            E, epoch = sq / P, epoch + 1
+        self.theta, self.final_E, self.epochs_run, self.train_time = theta, E, epoch, time.time() - t0
+        return self
+
+    def predict_proba(self, X):
+        return phi(phi(X @ self.W1 + self.theta) @ self.W2)
+
+
+class Recorder:
+    """Collects (features of a range block, features of the domain the full search chose) from the
+    full-search encoder of a TRAINING image; also the features of all its domain windows."""
+
+    def __init__(self):
+        self.X, self.DF, self.PF = [], [], []
+
+    def observe(self, blk, r, pool, d):
+        self.X.append(np.concatenate([block_features(blk[None])[0], [math.log2(r) / 5.0]]))
+        self.DF.append(pool.feat[d])
+
+    def arrays(self):
+        return np.array(self.X), np.array(self.DF), (np.concatenate(self.PF) if self.PF else np.zeros((0, 6)))
+
+
+class NNGrouper:
+    """Domain windows -> group = nearest node of an (offline, unsupervised) codebook W;
+    range block -> group predicted by the chaotic BPNN (sigmoid phi).  topk > 1 searches the k most
+    probable groups."""
+
+    def __init__(self, W, net, lo, span, topk=1):
+        self.W, self.net, self.lo, self.span, self.topk = W, net, lo, span, topk
+
+    def label_domains(self, base):
+        f = block_features(base)
+        return ((f[:, None, :] - self.W[None]) ** 2).sum(2).argmin(1)
+
+    def range_labels(self, blk, r):
+        f = np.concatenate([block_features(blk[None])[0], [math.log2(r) / 5.0]])
+        p = self.net.predict_proba(np.clip((f - self.lo) / self.span, 0.0, 1.0)[None])[0]
+        return [int(g) for g in np.argsort(-p)[:self.topk]]
+
+
+def train_nn_grouper(train_recs, nn):
+    """Offline training on the recordings of the TRAINING images.  Returns (NNGrouper, info)."""
+    arr = [r.arrays() for r in train_recs]
+    X = np.concatenate([a[0] for a in arr])
+    DF = np.concatenate([a[1] for a in arr])
+    PF = np.concatenate([a[2] for a in arr])
+    rs = np.random.RandomState(0)
+    if len(PF) > 3000:
+        PF = PF[rs.choice(len(PF), 3000, replace=False)]
+    t0 = time.time()
+    K = nn["groups"] ** 2
+    W = SOM((nn["groups"], nn["groups"])).fit(PF).W.copy()          # codebook = the groups
+    y = ((DF[:, None, :] - W[None]) ** 2).sum(2).argmin(1)
+    lo, span = X.min(0), np.maximum(X.max(0) - X.min(0), 1e-9)
+    Xn = np.clip((X - lo) / span, 0.0, 1.0)
+    T = np.eye(K)[y]
+    net = ChaoticBPNN(X.shape[1], nn["hidden"], K, nn["init"], nn["mode"], eta=nn["eta"], seed=0).fit(
+        Xn, T, epochs=nn["epochs"], batch=nn["batch"])
+    acc = float((net.predict_proba(Xn).argmax(1) == y).mean())
+    info = dict(samples=len(X), epochs=net.epochs_run, final_E=net.final_E, train_acc=acc,
+                time=time.time() - t0, W=W, lo=lo, span=span)
+    return NNGrouper(W, net, lo, span, nn["topk"]), info
+
+
+def heldout_accuracy(grouper, rec, topk=1):
+    X, DF, _ = rec.arrays()
+    if len(X) == 0:
+        return float("nan")
+    y = ((DF[:, None, :] - grouper.W[None]) ** 2).sum(2).argmin(1)
+    Xn = np.clip((X - grouper.lo) / grouper.span, 0.0, 1.0)
+    top = np.argsort(-grouper.net.predict_proba(Xn), 1)[:, :topk]
+    return float((top == y[:, None]).any(1).mean())
+
+
+# ==========================================================================
 # 6. Matching machinery
 # ==========================================================================
 class DomainPool:
     """Domain candidates for ONE range size r: 2r x 2r windows anchored at the domain (seed)
     blocks, down-sampled to r x r, each with its 8 isometries."""
 
-    def __init__(self, P, anchors, r, H, W, grid=None):
+    def __init__(self, P, anchors, r, H, W, grid=None, labeler=None, keep_feat=False):
         pos = sorted({(min(y, H - 2 * r), min(x, W - 2 * r)) for (y, x) in anchors})
         self.pos = np.array(pos)
         base = np.stack([P[y:y + 2 * r:2, x:x + 2 * r:2] for (y, x) in pos])
@@ -310,7 +516,14 @@ class DomainPool:
         self.sum_dd = (self.all[0] ** 2).sum(1)
         self.labels = None
         self.t_som = 0.0                                    # time spent training the SOM + labelling the domains
-        if grid:
+        if keep_feat:
+            self.feat = block_features(base)
+        if labeler is not None:                             # groups from the offline codebook (BPNN variant)
+            t0 = time.perf_counter()
+            self.labels = labeler.label_domains(base)
+            self.som = SimpleNamespace(W=labeler.W)         # used by candidates() for an empty group
+            self.t_som = time.perf_counter() - t0
+        elif grid:
             t0 = time.perf_counter()
             feats = block_features(base)
             self.som = SOM(grid).fit(feats)
@@ -390,11 +603,16 @@ def encode(img, algo, tau, cfg):
         e.seed_mask[y:y + s, x:x + s] = True
     e.seed_bytes = len(zlib.compress(img[e.seed_mask].astype(np.uint8).tobytes(), 9))   # lossless part
     anchors = [(y, x) for (y, x, s) in dom]
-    grid = (cfg["groups"], cfg["groups"]) if algo == "alg2" else None
+    grouper, recorder = cfg.get("grouper"), cfg.get("recorder")
+    use_nn = algo == "alg2" and grouper is not None             # BPNN groups instead of the per-image SOM
+    grid = (cfg["groups"], cfg["groups"]) if algo == "alg2" and not use_nn else None
     e.pools, r = {}, MAX_SIZE
     while r >= RMIN:
-        e.pools[r] = DomainPool(P, anchors, r, H, W, grid)
+        e.pools[r] = DomainPool(P, anchors, r, H, W, grid, labeler=grouper if use_nn else None,
+                                keep_feat=recorder is not None)
         e.t_som += e.pools[r].t_som
+        if recorder is not None:
+            recorder.PF.append(e.pools[r].feat)
         r //= 2
 
     stack = list(rng_blocks)
@@ -403,12 +621,19 @@ def encode(img, algo, tau, cfg):
         blk = img[y:y + r, x:x + r]
         pool = e.pools[r]
         l0 = time.perf_counter()
-        lab = int(pool.som.predict(block_features(blk[None]))[0]) if algo == "alg2" else None
-        idx = pool.candidates(lab)
+        if use_nn:
+            labs = grouper.range_labels(blk, r)
+            idx = pool.candidates(labs[0]) if len(labs) == 1 else \
+                np.unique(np.concatenate([pool.candidates(g) for g in labs]))
+        else:
+            lab = int(pool.som.predict(block_features(blk[None]))[0]) if algo == "alg2" else None
+            idx = pool.candidates(lab)
         s0 = time.perf_counter()
         e.t_label += s0 - l0
         d, k, si, o, sse = best_match(blk.ravel(), pool, idx)
         e.t_search += time.perf_counter() - s0
+        if recorder is not None:
+            recorder.observe(blk, r, pool, d)
         e.n_search += 1
         e.cand_frac += len(idx) / pool.n
         if math.sqrt(sse / (r * r)) > cfg["tol"] and r > RMIN:      # poor match -> 4 smaller range blocks
@@ -673,7 +898,7 @@ def paper_main(a, items, cfg, taus):
 
     reps = max(1, a.repeats)
 
-    def run(img, algo, tau):
+    def run(img, algo, tau, cfg=cfg):
         """Encode `reps` times (time = mean, less noisy), decode once.  e.bd = mean time breakdown."""
         es = [encode(img, algo, tau, cfg) for _ in range(reps)]
         e = es[-1]
@@ -701,6 +926,47 @@ def paper_main(a, items, cfg, taus):
         rows.append(["Avg"] + ["%.2f" % np.mean([enc[(i, t)].metrics[key] for i in range(n)]) for t in taus])
         blocks.append(box(title, head, rows)); mds.append(md(title, head, rows))
 
+    # ---- Algorithm II with the neural classifier (BPNN, sigmoid activation of Main_codeChaotic.py)
+    enc_nn, nn_info, cfg_nn, t4_nn = {}, {}, {}, None
+    if a.bpnn:
+        nn = dict(groups=a.groups, hidden=a.nn_hidden, init=a.nn_init, mode=a.nn_mode, epochs=a.nn_epochs,
+                  batch=a.nn_batch, eta=a.nn_eta, topk=a.topk)
+        tag = "BPNN, sigmoid phi, init=%s, mode=%s" % (a.nn_init, a.nn_mode)
+        print("\nBPNN classifier (%s): recording the full-search matches of the training images ..." % tag, flush=True)
+        recs = []
+        for im in images:                                       # full search (Algorithm I, tau=1e-5) = the supervision
+            r_ = Recorder()
+            encode(im, "alg1", 1e-5, dict(cfg, recorder=r_))
+            recs.append(r_)
+        for i in range(n):                                      # leave-one-out: image i is never in its own training set
+            g, info = train_nn_grouper([recs[j] for j in range(n) if j != i] or [recs[i]], nn)
+            info["heldout"], info["heldout_k"] = heldout_accuracy(g, recs[i], 1), heldout_accuracy(g, recs[i], a.topk)
+            cfg_nn[i], nn_info[i] = dict(cfg, grouper=g), info
+            print("  image %d: trained on %d samples  loss E=%.4f  train acc=%.1f%%  held-out acc=%.1f%%  (chance %.1f%%)  %.1f s"
+                  % (i + 1, info["samples"], info["final_E"], 100 * info["train_acc"], 100 * info["heldout"],
+                     100.0 / a.groups ** 2, info["time"]), flush=True)
+        for i, im in enumerate(images):
+            for t in taus:
+                e, _ = run(im, "alg2", t, cfg_nn[i])
+                enc_nn[(i, t)] = e
+                print("  [BPNN] image %d  %s  PSNR=%6.2f  time=%7.2f s  CR=%6.2f  pool searched=%.1f%%"
+                      % (i + 1, tau_name(t), e.metrics["psnr"], e.metrics["time"], e.metrics["cr"], 100 * e.cand_frac), flush=True)
+        for key, title in (("psnr", "Table 1b  PSNR (dB)"), ("time", "Table 2b  Time (sec)"), ("cr", "Table 3b  Compression Ratio")):
+            rows = [[str(i + 1)] + ["%.2f" % enc_nn[(i, t)].metrics[key] for t in taus] for i in range(n)]
+            rows.append(["Avg"] + ["%.2f" % np.mean([enc_nn[(i, t)].metrics[key] for i in range(n)]) for t in taus])
+            ttl = "%s - Algorithm II with the neural classifier (%s)" % (title, tag)
+            blocks.append(box(ttl, head, rows)); mds.append(md(ttl, head, rows))
+        t_ref = 1e-5 if 1e-5 in taus else taus[0]
+        h7 = ["Sample MRI Image", "train samples", "epochs", "loss E", "train acc %", "held-out acc %",
+              "held-out top-%d %%" % a.topk, "training (s)", "% pool searched"]
+        r7 = [[str(i + 1), str(nn_info[i]["samples"]), str(nn_info[i]["epochs"]), "%.4f" % nn_info[i]["final_E"],
+               "%.1f" % (100 * nn_info[i]["train_acc"]), "%.1f" % (100 * nn_info[i]["heldout"]),
+               "%.1f" % (100 * nn_info[i]["heldout_k"]), "%.1f" % nn_info[i]["time"],
+               "%.1f" % (100 * enc_nn[(i, t_ref)].cand_frac)] for i in range(n)]
+        ttl7 = ("Table 7  The neural classifier: how well it predicts the group of the best domain (chance = %.1f%%; "
+                "leave-one-out; the SOM has no such accuracy - it is unsupervised)" % (100.0 / a.groups ** 2))
+        blocks.append(box(ttl7, h7, r7)); mds.append(md(ttl7, h7, r7))
+
     t4, t4e, tau4 = {}, {}, 1e-5                                # Table 4: the three algorithms
     for algo in ALGOS:
         e, rec = run(images[t4_idx], algo, tau4)
@@ -709,6 +975,12 @@ def paper_main(a, items, cfg, taus):
         print("  Table 4  %-8s PSNR=%6.2f  time=%8.2f s  CR=%6.2f" % (algo, *t4[algo][:3]), flush=True)
     h4 = ["Metric", "Standard Fractal Encoding", "Proposed Algorithm I (tau=1e-5)", "Proposed Algorithm II (tau=1e-5)"]
     r4 = [[m] + ["%.2f" % t4[k][j] for k in ALGOS] for j, m in enumerate(("PSNR (dB)", "Compression Time (sec)", "Compression Ratio"))]
+    if a.bpnn:                                                  # extra column: Algorithm II + BPNN
+        e_nn, _ = run(images[t4_idx], "alg2", tau4, cfg_nn[t4_idx])
+        t4e["nn"] = e_nn
+        h4.append("Algorithm II + BPNN (tau=1e-5)")
+        for j, k in enumerate(("psnr", "time", "cr")):
+            r4[j].append("%.2f" % e_nn.metrics[k])
     ttl4 = "Table 4  PSNR achieved for Different Algorithms (Sample MRI Image %d)" % (t4_idx + 1)
     blocks.append(box(ttl4, h4, r4)); mds.append(md(ttl4, h4, r4))
     # ---- Table 5 / 6: where does the encoding time go?  (explains the speed-up of Algorithm II)
@@ -725,8 +997,9 @@ def paper_main(a, items, cfg, taus):
     r5 = bd_rows([[enc[(i, t)].bd for i in range(n)] for t in taus])
     ttl5 = "Table 5  Where the encoding time goes - Algorithm II at every threshold"
     blocks.append(box(ttl5, h5, r5)); mds.append(md(ttl5, h5, r5))
-    h6 = ["Sample image %d, tau=1e-5" % (t4_idx + 1), "Standard", "Algorithm I", "Algorithm II"]
-    cols = [bd_rows([[t4e[k].bd]]) for k in ALGOS]
+    keys6 = list(ALGOS) + (["nn"] if a.bpnn else [])
+    h6 = ["Sample image %d, tau=1e-5" % (t4_idx + 1), "Standard", "Algorithm I", "Algorithm II"] + (["Alg. II + BPNN"] if a.bpnn else [])
+    cols = [bd_rows([[t4e[k].bd]]) for k in keys6]
     r6 = [[cols[0][i][0]] + [c[i][1] for c in cols] for i in range(len(cols[0]))]
     ttl6 = "Table 6  Time breakdown of the three algorithms (does grouping pay off?)"
     blocks.append(box(ttl6, h6, r6)); mds.append(md(ttl6, h6, r6))
@@ -782,6 +1055,17 @@ def main(argv=None):
     ap.add_argument("--paper", action="store_true",
                     help="reproduce the paper's experiment on ALL images of --source (e.g. your 6 'training' images): "
                          "Tables 1-4 in the paper's layout + Figures 1,2,3,5,6,7,8")
+    ap.add_argument("--bpnn", action="store_true",
+                    help="--paper: ALSO run Algorithm II with a neural classifier (BPNN with the sigmoid activation of "
+                         "Main_codeChaotic.py) instead of the SOM; leave-one-out over the images (needs >= 2 images)")
+    ap.add_argument("--nn-init", default="BSLC", choices=["BSLC", "tanh", "sigmoid", "Logistic", "random"], help="BPNN weight initialisation")
+    ap.add_argument("--nn-mode", default="chaotic-epoch", choices=["gbdr", "chaotic", "chaotic-epoch"],
+                    help="gbdr: W<-W+eta*delta; chaotic: alpha_n at every update (exactly the file); chaotic-epoch: alpha_n once per epoch")
+    ap.add_argument("--nn-epochs", type=int, default=20)
+    ap.add_argument("--nn-batch", type=int, default=1, help="1 = 'for each sample p' as in Main_codeChaotic.py")
+    ap.add_argument("--nn-eta", type=float, default=0.1)
+    ap.add_argument("--nn-hidden", type=int, default=128)
+    ap.add_argument("--topk", type=int, default=1, help="BPNN: search the k most probable groups (1 = its group only)")
     ap.add_argument("--repeats", type=int, default=1, help="--paper: encode every case this many times and report the mean time (3 is steadier)")
     ap.add_argument("--t4-image", type=int, default=4, help="--paper: sample image used in Table 4 (paper: 4)")
     ap.add_argument("--force", action="store_true", help="continue even if the settings differ from the earlier run")
