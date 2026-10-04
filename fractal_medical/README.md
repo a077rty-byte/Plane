@@ -18,3 +18,10 @@ Notes
     python ablation.py --dir /content/mri --n 20 --size 512 --repeats 3
 `--som-init` random|chaotic|logistic, `--som-sched` linear|chaotic. The SOM has no activation
 function (competitive learning + Gaussian neighbourhood). `ablation.py` writes Table A to `results_ablation/`.
+
+## Any-size data set (single file for Colab / Drive)
+    python fractal_alg2_dataset.py --source archive.zip --out fractal_results            # whole Training/ part
+    python fractal_alg2_dataset.py --source folder --limit 200 --taus 1e-5 --workers 4
+`fractal_alg2_dataset.py` is self-contained (numpy + pillow). Any number of images (streamed, resumable via
+`results.csv`), any image size (`--size 0 --tile 512` = native size, tiled), zip or folder. Output: `results.csv`,
+`summary.txt/.md` (Tables 1-4 averaged over all images and per class), `recon/`.

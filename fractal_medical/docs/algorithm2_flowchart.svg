@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 1190" width="1180" height="1190">
+<defs><marker id="h" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 z" fill="#374151"/></marker></defs>
+<style>
+text{font-family:'DejaVu Sans',Arial,sans-serif;text-anchor:middle;fill:#111827}
+.b{font-weight:bold} .h{font-size:20px;font-weight:bold}
+text.lb{font-size:13px;fill:#374151;font-weight:bold} text.lg{font-size:13px;text-anchor:start}
+rect.n{fill:#fff;stroke:#374151;stroke-width:1.8} rect.s{fill:#e5e7eb;stroke:#374151;stroke-width:1.8}
+rect.g{fill:#d1fae5;stroke:#047857;stroke-width:1.8} rect.h{fill:#fde68a;stroke:#b45309;stroke-width:2}
+polygon.d{fill:#dbeafe;stroke:#1d4ed8;stroke-width:1.8}
+.a{fill:none;stroke:#374151;stroke-width:1.8} .dash{stroke-dasharray:7 5}
+</style>
+<rect width="1180" height="1190" fill="#fff"/>
+<line x1="760" y1="20" x2="760" y2="1110" stroke="#d1d5db" stroke-dasharray="4 4" style="display:none"/>
+<text x="340" y="30" class="h">Compression (Encoder)</text>
+<text x="980" y="30" class="h">Decompression (Decoder)</text>
+<rect x="260" y="60" width="160" height="40" rx="20.0" class="s"/>
+<text x="340.0" y="85.0" class="t b" font-size="15">Start</text>
+<polyline points="340,100 340,130" class="a" marker-end="url(#h)"/>
+<rect x="110" y="130" width="460" height="50" rx="8" class="n"/>
+<text x="340.0" y="160.0" class="t" font-size="15">Read input image I</text>
+<polyline points="340,180 340,210" class="a" marker-end="url(#h)"/>
+<rect x="110" y="210" width="460" height="60" rx="8" class="n"/>
+<text x="340.0" y="236.0" class="t" font-size="15">Quad-tree decomposition</text>
+<text x="340.0" y="254.0" class="t" font-size="15">of I into non-overlapping blocks  B = {b1 ... bn}</text>
+<polyline points="340,270 340,300" class="a" marker-end="url(#h)"/>
+<rect x="110" y="300" width="460" height="40" rx="8" class="n"/>
+<text x="340.0" y="325.0" class="t" font-size="15">For each block bi in B</text>
+<polyline points="340,340 340,360" class="a" marker-end="url(#h)"/>
+<polygon points="340,360.0 460.0,405 340,450.0 220.0,405" class="d"/>
+<text x="340" y="410" class="t" font-size="15">size(bi) > d_min ?</text>
+<polyline points="460,405 630,405 630,480" class="a" marker-end="url(#h)"/>
+<text x="500" y="397" class="lb">Yes</text>
+<polyline points="340,450 340,480" class="a" marker-end="url(#h)"/>
+<text x="368" y="472" class="lb">No</text>
+<polygon points="340,480.0 460.0,525 340,570.0 220.0,525" class="d"/>
+<text x="340" y="530" class="t" font-size="15">var(bi) > τ · var_max ?</text>
+<rect x="570" y="480" width="130" height="90" rx="8" class="n"/>
+<text x="635.0" y="521.0" class="t" font-size="15">Range block</text>
+<text x="635.0" y="539.0" class="t" font-size="15">R ← R ∪ bi</text>
+<polyline points="460,525 570,525" class="a" marker-end="url(#h)"/>
+<text x="500" y="517" class="lb">No</text>
+<rect x="10" y="480" width="130" height="90" rx="8" class="g"/>
+<text x="75.0" y="512.0" class="t" font-size="15">Domain block</text>
+<text x="75.0" y="530.0" class="t" font-size="15">D ← D ∪ bi</text>
+<text x="75.0" y="548.0" class="t" font-size="15">(feature-rich)</text>
+<polyline points="220,525 140,525" class="a" marker-end="url(#h)"/>
+<text x="165" y="517" class="lb">Yes</text>
+<polyline points="75,570 75,635 110,635" class="a" marker-end="url(#h)"/>
+<polyline points="635,570 635,635 570,635" class="a" marker-end="url(#h)"/>
+<rect x="110" y="610" width="460" height="50" rx="8" class="n"/>
+<text x="340.0" y="640.0" class="t" font-size="15">Domain pool D   ·   Range pool R</text>
+<polyline points="340,660 340,700" class="a" marker-end="url(#h)"/>
+<rect x="110" y="700" width="460" height="90" rx="8" class="h"/>
+<text x="340.0" y="732.0" class="t" font-size="15">SOM clustering (unsupervised, Kohonen)</text>
+<text x="340.0" y="750.0" class="t" font-size="15">Group D into n groups and R into n groups</text>
+<text x="340.0" y="768.0" class="t" font-size="15">using block features</text>
+<polyline points="340,790 340,820" class="a" marker-end="url(#h)"/>
+<rect x="110" y="820" width="460" height="50" rx="8" class="h"/>
+<text x="340.0" y="850.0" class="t" font-size="15">For each Range block: find its group label</text>
+<polyline points="340,870 340,900" class="a" marker-end="url(#h)"/>
+<rect x="110" y="900" width="460" height="80" rx="8" class="h"/>
+<text x="340.0" y="927.0" class="t" font-size="15">Search best-matching Domain ONLY inside</text>
+<text x="340.0" y="945.0" class="t" font-size="15">the same group; compute transform</text>
+<text x="340.0" y="963.0" class="t" font-size="15">coefficients (s, o, isometry)</text>
+<polyline points="340,980 340,1010" class="a" marker-end="url(#h)"/>
+<rect x="110" y="1010" width="460" height="60" rx="8" class="g"/>
+<text x="340.0" y="1036.0" class="t" font-size="15">Store: lossless-compressed Domain seeds</text>
+<text x="340.0" y="1054.0" class="t" font-size="15">+ transform coefficients (IFS code)</text>
+<polyline points="340,1070 340,1100" class="a" marker-end="url(#h)"/>
+<rect x="260" y="1100" width="160" height="40" rx="20.0" class="s"/>
+<text x="340.0" y="1125.0" class="t b" font-size="15">End</text>
+<rect x="900" y="60" width="160" height="40" rx="20" class="s"/>
+<text x="980" y="85" class="t b" font-size="15">Start</text>
+<polyline points="980.0,100 980.0,130" class="a" marker-end="url(#h)"/>
+<rect x="810" y="130" width="340" height="70" rx="8" class="n"/>
+<text x="980.0" y="161.0" class="t" font-size="15">Load saved coefficients</text>
+<text x="980.0" y="179.0" class="t" font-size="15">and Seed blocks</text>
+<polyline points="980.0,200 980.0,230" class="a" marker-end="url(#h)"/>
+<rect x="810" y="230" width="340" height="50" rx="8" class="n"/>
+<text x="980.0" y="260.0" class="t" font-size="15">Create memory buffers for range screens</text>
+<polyline points="980.0,280 980.0,310" class="a" marker-end="url(#h)"/>
+<rect x="810" y="310" width="340" height="70" rx="8" class="g"/>
+<text x="980.0" y="341.0" class="t" font-size="15">Rebuild feature-rich areas directly</text>
+<text x="980.0" y="359.0" class="t" font-size="15">from seed blocks  (lossless part)</text>
+<polyline points="980.0,380 980.0,410" class="a" marker-end="url(#h)"/>
+<rect x="810" y="410" width="340" height="80" rx="8" class="n"/>
+<text x="980.0" y="437.0" class="t" font-size="15">Apply transformations to seed blocks</text>
+<text x="980.0" y="455.0" class="t" font-size="15">to rebuild the remaining range area</text>
+<text x="980.0" y="473.0" class="t" font-size="15">(lossy part)</text>
+<polyline points="980.0,490 980.0,520" class="a" marker-end="url(#h)"/>
+<rect x="810" y="520" width="340" height="60" rx="8" class="n"/>
+<text x="980.0" y="546.0" class="t" font-size="15">Rebuild rough and smooth blocks</text>
+<text x="980.0" y="564.0" class="t" font-size="15">from IFS code</text>
+<polyline points="980.0,580 980.0,610" class="a" marker-end="url(#h)"/>
+<rect x="810" y="610" width="340" height="70" rx="8" class="n"/>
+<text x="980.0" y="641.0" class="t" font-size="15">Rebuild all remaining blocks</text>
+<text x="980.0" y="659.0" class="t" font-size="15">from stored seeds using IFS code</text>
+<polyline points="980.0,680 980.0,710" class="a" marker-end="url(#h)"/>
+<rect x="900" y="710" width="160" height="40" rx="20" class="s"/>
+<text x="980" y="735" class="t b" font-size="13">Reconstructed image</text>
+<polyline points="570,1000 760,1000 760,165 810,165" class="a dash" marker-end="url(#h)"/>
+<text x="665" y="992" class="lb">seeds + coefficients</text>
+<rect x="790" y="820" width="22" height="16" rx="4" class="h"/><text x="820" y="833" class="lg">Algorithm-II addition (SOM + group search)</text>
+<rect x="790" y="850" width="22" height="16" rx="4" class="g"/><text x="820" y="863" class="lg">Lossless part (seed blocks)</text>
+</svg>
